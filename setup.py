@@ -28,7 +28,7 @@ setup(
         'torch~=1.3.1',
         'torchtext~=0.3.1',
         'tqdm~=4.36.1',
-        'transformers~=2.3.0',
+        'transformers~=3.5.0',
     ],
     entry_points={"console_scripts": ["ratsql=run:main"]},
 )

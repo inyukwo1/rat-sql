@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-
+import torch
 import argparse
 import json
 
 import _jsonnet
 import attr
 from ratsql.commands import preprocess, train, infer, eval
+import torch.multiprocessing as mp
+import torch.distributed as dist
 
 @attr.s
 class PreprocessConfig:
@@ -18,6 +20,7 @@ class TrainConfig:
     config = attr.ib()
     config_args = attr.ib()
     logdir = attr.ib()
+    ray = attr.ib()
 
 
 @attr.s
@@ -45,12 +48,22 @@ class EvalConfig:
     output = attr.ib()
 
 
+def train_model(gpu, model_config_file,
+                                   model_config_args, logdir, ray):
+    dist.init_process_group(backend='nccl', init_method='tcp://127.0.0.1:23456',
+                            world_size=8, rank=gpu)
+    train_config = TrainConfig(model_config_file,
+                               model_config_args, logdir, ray)
+    train.main(gpu, train_config)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', help="preprocess/train/eval", choices=["preprocess", "train", "eval"])
     parser.add_argument('exp_config_file', help="jsonnet file for experiments")
     parser.add_argument('--model_config_args', help="optional overrides for model config args")
     parser.add_argument('--logdir', help="optional override for logdir")
+    parser.add_argument('--ray', action='store_true')
     args = parser.parse_args()
 
     exp_config = json.loads(_jsonnet.evaluate_file(args.exp_config_file))
@@ -72,9 +85,9 @@ def main():
         preprocess_config = PreprocessConfig(model_config_file, model_config_args)
         preprocess.main(preprocess_config)
     elif args.mode == "train":
-        train_config = TrainConfig(model_config_file,
-                                   model_config_args, logdir)
-        train.main(train_config)
+        mp.spawn(train_model, nprocs=8, args=(model_config_file,
+                                   model_config_args, logdir, args.ray))
+
     elif args.mode == "eval":
         for step in exp_config["eval_steps"]:
             infer_output_path = f"{exp_config['eval_output']}/{exp_config['eval_name']}-step{step}.infer"

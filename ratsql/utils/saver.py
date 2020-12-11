@@ -38,8 +38,8 @@ def load_checkpoint(item_dict, model_dir, map_location=None, step=None):
 
         for item_name in item_dict:
             item_dict[item_name].load_state_dict(checkpoint[item_name])
-        return checkpoint.get('step', 0)
-    return 0
+        return checkpoint.get('step', 0), checkpoint.get('loss', 1000000)
+    return 0, 1000000
 
 
 def load_and_map_checkpoint(model, model_dir, remap):
@@ -53,7 +53,7 @@ def load_and_map_checkpoint(model, model_dir, remap):
     model.load_state_dict(new_state_dict)
 
 
-def save_checkpoint(items, step, model_dir, ignore=[],
+def save_checkpoint(items, step, model_dir, loss, ignore=[],
                     keep_every_n=10000000):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
@@ -70,35 +70,44 @@ def save_checkpoint(items, step, model_dir, ignore=[],
     saved_dic = {}
     for key in items:
         saved_dic[key] = items[key].state_dict()
-    torch.save({**saved_dic, "step": step}, path_with_step)
+    torch.save({**saved_dic, "step": step}, path_without_step)
 
-    try:
-        os.unlink(path_without_step)
-    except FileNotFoundError:
-        pass
-    try:
-        os.symlink(os.path.basename(path_with_step), path_without_step)
-    except OSError:
-        shutil.copy2(path_with_step, path_without_step)
+    # try:
+    #     os.unlink(path_without_step)
+    # except FileNotFoundError:
+    #     pass
+    # try:
+    #     os.symlink(os.path.basename(path_with_step), path_without_step)
+    # except OSError:
+    #     shutil.copy2(path_with_step, path_without_step)
+    #
+    # # Cull old checkpoints.
+    # if keep_every_n is not None:
+    #     all_checkpoints = []
+    #     for name in os.listdir(model_dir):
+    #         m = CHECKPOINT_PATTERN.match(name)
+    #         if m is None or name == os.path.basename(path_with_step):
+    #             continue
+    #         checkpoint_step = int(m.group(1))
+    #         all_checkpoints.append((checkpoint_step, name))
+    #     all_checkpoints.sort()
+    #
+    #     last_step = float('-inf')
+    #     for checkpoint_step, name in all_checkpoints:
+    #         if checkpoint_step - last_step >= keep_every_n:
+    #             last_step = checkpoint_step
+    #             continue
+    #         os.unlink(os.path.join(model_dir, name))
 
-    # Cull old checkpoints.
-    if keep_every_n is not None:
-        all_checkpoints = []
-        for name in os.listdir(model_dir):
-            m = CHECKPOINT_PATTERN.match(name)
-            if m is None or name == os.path.basename(path_with_step):
-                continue
-            checkpoint_step = int(m.group(1))
-            all_checkpoints.append((checkpoint_step, name))
-        all_checkpoints.sort()
-
-        last_step = float('-inf')
-        for checkpoint_step, name in all_checkpoints:
-            if checkpoint_step - last_step >= keep_every_n:
-                last_step = checkpoint_step
-                continue
-            os.unlink(os.path.join(model_dir, name))
-
+def save_checkpoint_minloss(items, step, model_dir, loss):
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    path_without_step = os.path.join(model_dir, 'model_checkpoint_minloss')
+    state_dict = items["model"].state_dict()
+    saved_dic = {}
+    for key in items:
+        saved_dic[key] = items[key].state_dict()
+    torch.save({**saved_dic, "step": step, "loss": loss}, path_without_step)
 
 class Saver(object):
     """Class to manage save and restore for the model and optimizer."""
@@ -110,7 +119,7 @@ class Saver(object):
         self._keep_every_n = keep_every_n
 
     def restore(self, model_dir, map_location=None,
-                step=None, item_keys=["model", "optimizer"]):
+                step=None, item_keys=["model"]):
         """Restores model and optimizer from given directory.
             Specify what shoud be restored
 
@@ -122,15 +131,19 @@ class Saver(object):
             items2restore, model_dir, map_location, step)
         return last_step
 
-    def save(self, model_dir, step):
+    def save(self, model_dir, step, loss):
         """Saves model and optimizer to given directory.
 
         Args:
            model_dir: Model directory to save.
            step: Current training step.
         """
-        save_checkpoint(self._items, step, model_dir,
+        save_checkpoint(self._items, step, model_dir, loss,
                         keep_every_n=self._keep_every_n)
+
+    def save_minloss(self, model_dir, step, loss):
+        save_checkpoint_minloss(self._items, step, model_dir, loss)
+
 
     def restore_part(self, other_model_dir, remap):
         """Restores part of the model from other directory.

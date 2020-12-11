@@ -3,7 +3,7 @@ from typing import Tuple
 import torch
 
 
-class RecurrentDropoutLSTMCell(torch.jit.ScriptModule):
+class RecurrentDropoutLSTMCell(torch.nn.Module):
     __constants__ = ['hidden_size']
 
     def __init__(self, input_size, hidden_size, dropout=0.):
@@ -27,15 +27,15 @@ class RecurrentDropoutLSTMCell(torch.jit.ScriptModule):
         self.bias_ih = torch.nn.Parameter(torch.empty(4 * hidden_size))
         self.bias_hh = torch.nn.Parameter(torch.empty(4 * hidden_size))
 
-        self._input_dropout_mask = torch.jit.Attribute(torch.empty((), requires_grad=False), torch.Tensor)
-        self._h_dropout_mask = torch.jit.Attribute(torch.empty((), requires_grad=False), torch.Tensor)
+        # self._input_dropout_mask = torch.nn.Parameter(torch.empty((), requires_grad=False), torch.Tensor)
+        # self._h_dropout_mask = torch.nn.Parameter(torch.empty((), requires_grad=False), torch.Tensor)
         # call to super is needed because torch.jit.ScriptModule deletes the
         # _register_state_dict_hook and _register_load_state_dict_pre_hook methods.
         # TODO: In Torch 1.3, discontinue use of torch.jit.Attribute so that
         # the dropout masks don't end up in the state dict in the first place.
-        super(torch.jit.ScriptModule, self)._register_state_dict_hook(self._hook_remove_dropout_masks_from_state_dict)
-        super(torch.jit.ScriptModule, self)._register_load_state_dict_pre_hook(
-            self._hook_add_dropout_masks_to_state_dict)
+        # super(torch.jit.ScriptModule, self)._register_state_dict_hook(self._hook_remove_dropout_masks_from_state_dict)
+        # super(torch.jit.ScriptModule, self)._register_load_state_dict_pre_hook(
+        #     self._hook_add_dropout_masks_to_state_dict)
 
         self.reset_parameters()
 
@@ -84,7 +84,6 @@ class RecurrentDropoutLSTMCell(torch.jit.ScriptModule):
         state_dict[prefix + '_input_dropout_mask'] = self._input_dropout_mask
         state_dict[prefix + '_h_dropout_mask'] = self._h_dropout_mask
 
-    @torch.jit.script_method
     def forward(
             self,
             input: torch.Tensor,

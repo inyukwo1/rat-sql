@@ -33,14 +33,15 @@ class EncDecModel(torch.nn.Module):
             self.dec_preproc = registry.lookup('decoder', decoder['name']).Preproc(**decoder_preproc)
         
         def validate_item(self, item, section):
-            enc_result, enc_info = self.enc_preproc.validate_item(item, section)
+            enc_result, enc_info = self.enc_preproc.validate_item(item, section,
+                                                                  bert_version=self.enc_preproc.bert_version)
             dec_result, dec_info = self.dec_preproc.validate_item(item, section)
             
             return enc_result and dec_result, (enc_info, dec_info)
         
         def add_item(self, item, section, validation_info):
             enc_info, dec_info = validation_info
-            self.enc_preproc.add_item(item, section, enc_info)
+            self.enc_preproc.add_item(item, section, enc_info, bert_version=self.enc_preproc.bert_version)
             self.dec_preproc.add_item(item, section, dec_info)
         
         def clear_items(self):
@@ -70,6 +71,9 @@ class EncDecModel(torch.nn.Module):
             self.compute_loss = self._compute_loss_enc_batched
         else:
             self.compute_loss = self._compute_loss_unbatched
+
+    def forward(self, batch):
+        return self._compute_loss_enc_batched(batch)
 
     def _compute_loss_enc_batched(self, batch, debug=False):
         losses = []

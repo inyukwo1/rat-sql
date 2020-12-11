@@ -6,7 +6,7 @@ import os
 import attr
 import numpy as np
 import torch
-from transformers import BertModel, BertTokenizer
+from transformers import BertModel, BertTokenizer, RobertaTokenizer, RobertaModel
 
 from ratsql.models import abstract_preproc
 from ratsql.models.spider import spider_enc_modules
@@ -58,7 +58,8 @@ def preprocess_schema_uncached(schema,
                                tokenize_func,
                                include_table_name_in_column,
                                fix_issue_16_primary_keys,
-                               bert=False):
+                               bert=False,
+                               bert_version="bert-base-uncased"):
     """If it's bert, we also cache the normalized version of 
     question/column/table for schema linking"""
     r = PreprocessedSchema()
@@ -75,7 +76,7 @@ def preprocess_schema_uncached(schema,
         if bert:
             # for bert, we take the representation of the first word
             column_name = col_toks + [type_tok]
-            r.normalized_column_names.append(Bertokens(col_toks))
+            r.normalized_column_names.append(Bertokens(col_toks, bert_version=bert_version))
         else:
             column_name = [type_tok] + col_toks
 
@@ -109,7 +110,7 @@ def preprocess_schema_uncached(schema,
             table.name, table.unsplit_name)
         r.table_names.append(table_toks)
         if bert:
-            r.normalized_table_names.append(Bertokens(table_toks))
+            r.normalized_table_names.append(Bertokens(table_toks, bert_version=bert_version))
     last_table = schema.tables[-1]
 
     r.foreign_keys_tables = serialization.to_dict_with_sorted_values(r.foreign_keys_tables)
@@ -542,8 +543,9 @@ class SpiderEncoderV2(torch.nn.Module):
 
 
 class Bertokens:
-    def __init__(self, pieces):
+    def __init__(self, pieces, bert_version="bert-base-uncased"):
         self.pieces = pieces
+        self.bert_version = bert_version
 
         self.normalized_pieces = None
         self.recovered_pieces = None
@@ -558,44 +560,58 @@ class Bertokens:
         E.g., a ##b ##c will be normalized as "abc", "", ""
         NOTE: this is only used for schema linking
         """
-        self.startidx2pieces = dict()
-        self.pieces2startidx = dict()
-        cache_start = None
-        for i, piece in enumerate(self.pieces + [""]):
-            if piece.startswith("##"):
-                if cache_start is None:
-                    cache_start = i - 1
+        if self.bert_version == 'Salesforce/grappa_large_jnt':
+            new_toks = []
+            idx_map = {}
+            for idx, tok in enumerate(self.pieces):
+                if not new_toks:
+                    idx_map[len(new_toks)] = idx
+                    new_toks += [tok]
+                elif tok[0] == chr(288):
+                    idx_map[len(new_toks)] = idx
+                    new_toks += [tok.strip(chr(288))]
+                else:
+                    new_toks[-1] = new_toks[-1] + tok
+            self.idx_map = idx_map
+        else:
+            self.startidx2pieces = dict()
+            self.pieces2startidx = dict()
+            cache_start = None
+            for i, piece in enumerate(self.pieces + [""]):
+                if piece.startswith("##"):
+                    if cache_start is None:
+                        cache_start = i - 1
 
-                self.pieces2startidx[i] = cache_start
-                self.pieces2startidx[i - 1] = cache_start
-            else:
-                if cache_start is not None:
-                    self.startidx2pieces[cache_start] = i
-                cache_start = None
-        assert cache_start is None
+                    self.pieces2startidx[i] = cache_start
+                    self.pieces2startidx[i - 1] = cache_start
+                else:
+                    if cache_start is not None:
+                        self.startidx2pieces[cache_start] = i
+                    cache_start = None
+            assert cache_start is None
 
-        # combine pieces, "abc", "", ""
-        combined_word = {}
-        for start, end in self.startidx2pieces.items():
-            assert end - start + 1 < 10
-            pieces = [self.pieces[start]] + [self.pieces[_id].strip("##") for _id in range(start + 1, end)]
-            word = "".join(pieces)
-            combined_word[start] = word
+            # combine pieces, "abc", "", ""
+            combined_word = {}
+            for start, end in self.startidx2pieces.items():
+                assert end - start + 1 < 10
+                pieces = [self.pieces[start]] + [self.pieces[_id].strip("##") for _id in range(start + 1, end)]
+                word = "".join(pieces)
+                combined_word[start] = word
 
-        # remove "", only keep "abc"
-        idx_map = {}
-        new_toks = []
-        for i, piece in enumerate(self.pieces):
-            if i in combined_word:
-                idx_map[len(new_toks)] = i
-                new_toks.append(combined_word[i])
-            elif i in self.pieces2startidx:
-                # remove it
-                pass
-            else:
-                idx_map[len(new_toks)] = i
-                new_toks.append(piece)
-        self.idx_map = idx_map
+            # remove "", only keep "abc"
+            idx_map = {}
+            new_toks = []
+            for i, piece in enumerate(self.pieces):
+                if i in combined_word:
+                    idx_map[len(new_toks)] = i
+                    new_toks.append(combined_word[i])
+                elif i in self.pieces2startidx:
+                    # remove it
+                    pass
+                else:
+                    idx_map[len(new_toks)] = i
+                    new_toks.append(piece)
+            self.idx_map = idx_map
 
         # lemmatize "abc"
         normalized_toks = []
@@ -654,6 +670,7 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
             compute_sc_link=True,
             compute_cv_link=False):
 
+        self.bert_version = bert_version
         self.data_dir = os.path.join(save_path, 'enc')
         self.db_path = db_path
         self.texts = collections.defaultdict(list)
@@ -664,8 +681,11 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
 
         self.counted_db_ids = set()
         self.preprocessed_schemas = {}
+        if bert_version == "Salesforce/grappa_large_jnt":
+            self.tokenizer = RobertaTokenizer.from_pretrained("roberta-large")
+        else:
+            self.tokenizer = BertTokenizer.from_pretrained(bert_version)
 
-        self.tokenizer = BertTokenizer.from_pretrained(bert_version)
 
         # TODO: should get types from the data
         column_types = ["text", "number", "time", "boolean", "others"]
@@ -677,14 +697,14 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
             return toks
         return presplit
 
-    def add_item(self, item, section, validation_info):
-        preprocessed = self.preprocess_item(item, validation_info)
+    def add_item(self, item, section, validation_info, bert_version="bert-base-uncased"):
+        preprocessed = self.preprocess_item(item, validation_info, bert_version=bert_version)
         self.texts[section].append(preprocessed)
 
-    def preprocess_item(self, item, validation_info):
+    def preprocess_item(self, item, validation_info, bert_version="bert-base-uncased"):
         question = self._tokenize(item.text, item.orig['question'])
         preproc_schema = self._preprocess_schema(item.schema)
-        question_bert_tokens = Bertokens(question)
+        question_bert_tokens = Bertokens(question, bert_version=bert_version)
         if self.compute_sc_link:
             sc_link = question_bert_tokens.bert_schema_linking(
                 preproc_schema.normalized_column_names,
@@ -714,9 +734,9 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
             'primary_keys': preproc_schema.primary_keys,
         }
 
-    def validate_item(self, item, section):
+    def validate_item(self, item, section, bert_version="bert-base-uncased"):
         question = self._tokenize(item.text, item.orig['question'])
-        preproc_schema = self._preprocess_schema(item.schema)
+        preproc_schema = self._preprocess_schema(item.schema, bert_version=bert_version)
 
         num_words = len(question) + 2 + \
                     sum(len(c) + 1 for c in preproc_schema.column_names) + \
@@ -726,12 +746,12 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
         else:
             return True, None
 
-    def _preprocess_schema(self, schema):
+    def _preprocess_schema(self, schema, bert_version="bert-base-uncased"):
         if schema.db_id in self.preprocessed_schemas:
             return self.preprocessed_schemas[schema.db_id]
         result = preprocess_schema_uncached(schema, self._tokenize,
                                             self.include_table_name_in_column,
-                                            self.fix_issue_16_primary_keys, bert=True)
+                                            self.fix_issue_16_primary_keys, bert=True, bert_version=bert_version)
         self.preprocessed_schemas[schema.db_id] = result
         return result
 
@@ -745,7 +765,10 @@ class SpiderEncoderBertPreproc(SpiderEncoderV2Preproc):
                     f.write(json.dumps(text) + '\n')
 
     def load(self):
-        self.tokenizer = BertTokenizer.from_pretrained(self.data_dir)
+        if self.bert_version == "Salesforce/grappa_large_jnt":
+            self.tokenizer = RobertaTokenizer.from_pretrained(self.data_dir)
+        else:
+            self.tokenizer = BertTokenizer.from_pretrained(self.data_dir)
 
 
 @registry.register('encoder', 'spider-bert')
@@ -767,8 +790,8 @@ class SpiderEncoderBert(torch.nn.Module):
         self._device = device
         self.preproc = preproc
         self.bert_token_type = bert_token_type
-        self.base_enc_hidden_size = 1024 if bert_version == "bert-large-uncased-whole-word-masking" else 768
-
+        self.base_enc_hidden_size = 1024 if bert_version in ["bert-large-uncased-whole-word-masking",
+                                                             "Salesforce/grappa_large_jnt"] else 768
         assert summarize_header in ["first", "avg"]
         self.summarize_header = summarize_header
         self.enc_hidden_size = self.base_enc_hidden_size
@@ -791,7 +814,10 @@ class SpiderEncoderBert(torch.nn.Module):
             sc_link=True,
         )
 
-        self.bert_model = BertModel.from_pretrained(bert_version)
+        if bert_version == 'Salesforce/grappa_large_jnt':
+            self.bert_model = RobertaModel.from_pretrained(bert_version)
+        else:
+            self.bert_model = BertModel.from_pretrained(bert_version)
         self.tokenizer = self.preproc.tokenizer
         self.bert_model.resize_token_embeddings(len(self.tokenizer))  # several tokens added
 
